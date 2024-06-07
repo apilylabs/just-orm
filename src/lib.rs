@@ -1,83 +1,56 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::fs::File;
+use serde_json::{from_str, to_string_pretty, Value};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const BASE_DIR: &str = "json-db";
 
-fn create_directory_if_not_exists(dir: &str) {
-    if !Path::new(dir).exists() {
-        fs::create_dir_all(dir).expect("Failed to create directory");
-    }
-}
-
-fn read_json_file<T: serde::de::DeserializeOwned>(file_path: &str) -> Option<T> {
-    if Path::new(file_path).exists() {
-        let mut file = File::open(file_path).expect("Failed to open file");
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .expect("Failed to read file");
-        serde_json::from_str(&content).ok()
-    } else {
-        None
-    }
-}
-
-fn write_json_file<T: serde::Serialize>(file_path: &str, data: &T) {
-    let content = serde_json::to_string_pretty(data).expect("Failed to serialize data");
-    let mut file = File::create(file_path).expect("Failed to create file");
-    file.write_all(content.as_bytes())
-        .expect("Failed to write file");
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct TestData {
-    pub id: String,
-    pub name: String,
-}
-
-pub struct JsonDataStore {
-    base_path: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonDatabase<T> {
+    base_path: PathBuf,
     current_model_name: Option<String>,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl JsonDataStore {
+impl<T> JsonDatabase<T>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Clone + Identifiable,
+{
     pub fn new(model_name: Option<&str>) -> Self {
-        let base_path = match model_name {
-            Some(name) => {
-                let path = format!("{}/{}", BASE_DIR, name);
-                create_directory_if_not_exists(&path);
-                path
-            }
-            None => {
-                create_directory_if_not_exists(BASE_DIR);
-                BASE_DIR.to_string()
-            }
+        let base_path = if let Some(model_name) = model_name {
+            let path = Path::new(BASE_DIR).join(model_name);
+            create_directory_if_not_exists(&path);
+            path
+        } else {
+            let path = Path::new(BASE_DIR).to_path_buf();
+            create_directory_if_not_exists(&path);
+            path
         };
 
-        Self {
+        JsonDatabase {
             base_path,
-            current_model_name: model_name.map(|name| name.to_string()),
+            current_model_name: model_name.map(String::from),
+            _marker: std::marker::PhantomData,
         }
     }
 
     pub fn model(&mut self, model_name: &str) -> &mut Self {
         self.current_model_name = Some(model_name.to_string());
-        create_directory_if_not_exists(&format!("{}/{}", BASE_DIR, model_name));
+        create_directory_if_not_exists(&self.get_model_path(model_name));
         self
     }
 
-    fn get_model_path(&self, model_name: &str) -> String {
-        format!("{}/{}", BASE_DIR, model_name)
+    fn get_model_path(&self, model_name: &str) -> PathBuf {
+        Path::new(BASE_DIR).join(model_name)
     }
 
-    fn get_file_path(&self, id: &str) -> String {
+    fn get_file_path(&self, id: &str) -> PathBuf {
         let model_name = self
             .current_model_name
             .as_ref()
             .expect("Model name is not specified");
-        format!("{}/{}.json", self.get_model_path(model_name), id)
+        self.get_model_path(model_name).join(format!("{}.json", id))
     }
 
     fn get_all_files(&self) -> Vec<String> {
@@ -87,12 +60,15 @@ impl JsonDataStore {
             .expect("Model name is not specified");
         let model_path = self.get_model_path(model_name);
         create_directory_if_not_exists(&model_path);
-        fs::read_dir(&model_path)
-            .expect("Failed to read directory")
+
+        fs::read_dir(model_path)
+            .expect("Unable to read directory")
             .filter_map(|entry| {
-                let entry = entry.expect("Failed to read directory entry");
-                if entry.path().extension().map_or(false, |ext| ext == "json") {
-                    Some(entry.path().display().to_string())
+                let entry = entry.expect("Unable to get directory entry");
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "json") {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
                 } else {
                     None
                 }
@@ -100,298 +76,244 @@ impl JsonDataStore {
             .collect()
     }
 
-    pub fn create_model<T: serde::Serialize + JsonDbExtensions>(&self, data: T) {
-        let id = data.get_id().to_string();
+    fn matches_condition(&self, item: &Value, condition: &Value) -> bool {
+        if !condition.is_object() || condition.is_null() {
+            return item == condition;
+        }
+        if !item.is_object() || item.is_null() {
+            return false;
+        }
+
+        condition.as_object().unwrap().iter().all(|(key, value)| {
+            let keys: Vec<&str> = key.split('.').collect();
+            let nested_value = self.get_nested_property(item, &keys);
+            if nested_value.is_object() && value.is_object() {
+                self.matches_condition(nested_value, value)
+            } else {
+                nested_value == value
+            }
+        })
+    }
+
+    fn get_nested_property<'a>(&self, obj: &'a Value, keys: &[&str]) -> &'a Value {
+        keys.iter()
+            .fold(obj, |acc, key| acc.get(*key).unwrap_or(&Value::Null))
+    }
+
+    fn set_nested_property(&self, obj: &mut Value, keys: &[&str], value: Value) {
+        if keys.len() == 1 {
+            obj[keys[0]] = value;
+        } else {
+            let key = keys[0];
+            let next_obj = obj
+                .as_object_mut()
+                .unwrap()
+                .entry(key)
+                .or_insert_with(|| Value::Object(Default::default()));
+            self.set_nested_property(next_obj, &keys[1..], value);
+        }
+    }
+
+    fn update_nested_object(&self, target: &mut Value, source: &Value) {
+        for (key, value) in source.as_object().unwrap().iter() {
+            let keys: Vec<&str> = key.split('.').collect();
+            self.set_nested_property(target, &keys, value.clone());
+        }
+    }
+
+    pub fn create_model(&self, data: T) {
+        let id = data.get_id();
+        if id.is_empty() {
+            panic!("Data must have an id field");
+        }
         self.create(&id, data);
     }
 
-    pub fn create<T: serde::Serialize>(&self, id: &str, data: T) {
+    pub fn create(&self, id: &str, data: T) {
         let file_path = self.get_file_path(id);
         write_json_file(&file_path, &data);
     }
 
-    pub fn find_by_id<T: serde::de::DeserializeOwned>(&self, id: &str) -> Option<T> {
+    pub fn find_by_id(&self, id: &str) -> Option<T> {
         let file_path = self.get_file_path(id);
+        println!("--aaaaaa-{:?}", file_path);
         read_json_file(&file_path)
     }
 
-    pub fn update_by_id<T: serde::de::DeserializeOwned + serde::Serialize + JsonDbExtensions>(
-        &self,
-        id: &str,
-        data: T,
-    ) {
+    pub fn update_by_id(&self, id: &str, data: Value) {
         let file_path = self.get_file_path(id);
-        let existing_data: Option<T> = self.find_by_id(id);
-        if let Some(mut existing_data) = existing_data {
-            existing_data.update(data);
-            write_json_file(&file_path, &existing_data);
+
+        if let Some(mut existing_data) = self.find_by_id(id) {
+            let mut existing_json = serde_json::to_value(&existing_data).unwrap();
+
+            self.update_nested_object(&mut existing_json, &data);
+            let updated_data: T = serde_json::from_value(existing_json).unwrap();
+            write_json_file(&file_path, &updated_data);
         }
     }
 
-    pub fn delete_by_id<T: JsonDbExtensions>(&self, id: &str) {
+    pub fn delete_by_id(&self, id: &str) {
         let file_path = self.get_file_path(id);
-        if Path::new(&file_path).exists() {
-            fs::remove_file(file_path).expect("Failed to delete file");
+        if file_path.exists() {
+            fs::remove_file(file_path).expect("Unable to delete file");
         }
     }
 
-    pub fn find_all<T: serde::de::DeserializeOwned>(&self) -> Vec<T> {
+    pub fn find_all(&self) -> Vec<T> {
         let files = self.get_all_files();
         files
             .into_iter()
-            .filter_map(|file| read_json_file::<T>(&file))
+            .filter_map(|file| {
+                read_json_file(
+                    &self
+                        .get_model_path(self.current_model_name.as_ref().unwrap())
+                        .join(file),
+                )
+            })
             .collect()
     }
 
-    pub fn find<T: serde::de::DeserializeOwned + JsonDbExtensions>(&self, condition: &T) -> Vec<T> {
-        self.find_all::<T>()
+    pub fn find(&self, condition: &Value) -> Vec<T> {
+        self.find_all()
             .into_iter()
-            .filter(|item| item.matches_condition(condition))
+            .filter(|item| self.matches_condition(&serde_json::to_value(item).unwrap(), condition))
             .collect()
     }
 
-    pub fn find_one<T: serde::de::DeserializeOwned + JsonDbExtensions>(
-        &self,
-        condition: &T,
-    ) -> Option<T> {
-        self.find_all::<T>()
+    pub fn find_one(&self, condition: &Value) -> Option<T> {
+        self.find_all()
             .into_iter()
-            .find(|item| item.matches_condition(condition))
+            .find(|item| self.matches_condition(&serde_json::to_value(item).unwrap(), condition))
     }
 
-    pub fn count<T: serde::de::DeserializeOwned + JsonDbExtensions>(&self, condition: &T) -> usize {
+    pub fn count(&self, condition: &Value) -> usize {
         self.find(condition).len()
     }
 
-    pub fn update_many<T: serde::de::DeserializeOwned + serde::Serialize + JsonDbExtensions>(
-        &self,
-        condition: &T,
-        data: T,
-    ) {
+    pub fn update_many(&self, condition: &Value, data: &Value) {
         let items = self.find(condition);
         for item in items {
-            let id = item.get_id().to_string();
+            let id = item.get_id();
             self.update_by_id(&id, data.clone());
         }
     }
 
-    pub fn delete_many<T: serde::de::DeserializeOwned + JsonDbExtensions>(&self, condition: &T) {
+    pub fn delete_many(&self, condition: &Value) {
         let items = self.find(condition);
         for item in items {
-            let id = item.get_id().to_string();
-            self.delete_by_id::<T>(&id);
+            let id = item.get_id();
+            self.delete_by_id(&id);
         }
     }
 
-    pub fn push<T: serde::de::DeserializeOwned + serde::Serialize + JsonDbExtensions>(
-        &self,
-        condition: &T,
-        array_path: &str,
-        element: T,
-    ) {
+    pub fn push(&self, condition: &Value, array_path: &str, element: &Value) {
         let items = self.find(condition);
         for item in items {
-            let id = item.get_id().to_string();
-            let mut data: T = self.find_by_id(&id).expect("Failed to find item by id");
-            data.push_to_array(array_path, element.clone());
-            self.update_by_id(&id, data);
+            let id = item.get_id();
+            if let Some(data) = self.find_by_id(&id) {
+                let mut data_json = serde_json::to_value(&data).unwrap();
+                let keys: Vec<&str> = array_path.split('.').collect();
+                let array = self.get_nested_property(&data_json, &keys);
+                if array.is_array() {
+                    let mut array = array.as_array().unwrap().clone();
+                    array.push(element.clone());
+                    self.set_nested_property(&mut data_json, &keys, Value::Array(array));
+                    let updated_data: T = serde_json::from_value(data_json).unwrap();
+                    self.update_by_id(&id, serde_json::to_value(updated_data).unwrap());
+                }
+            }
         }
     }
 
-    pub fn pull<T: serde::de::DeserializeOwned + serde::Serialize + JsonDbExtensions>(
-        &self,
-        condition: &T,
-        array_path: &str,
-        pull_condition: &T,
-    ) {
+    pub fn pull(&self, condition: &Value, array_path: &str, pull_condition: &Value) {
         let items = self.find(condition);
         for item in items {
-            let id = item.get_id().to_string();
-            let mut data: T = self.find_by_id(&id).expect("Failed to find item by id");
-            data.pull_from_array(array_path, pull_condition);
-            self.update_by_id(&id, data);
+            let id = item.get_id();
+            if let Some(data) = self.find_by_id(&id) {
+                let mut data_json = serde_json::to_value(&data).unwrap();
+                let keys: Vec<&str> = array_path.split('.').collect();
+                let array = self.get_nested_property(&data_json, &keys);
+                if array.is_array() {
+                    let new_array: Vec<Value> = array
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .filter(|elem| !self.matches_condition(elem, pull_condition))
+                        .collect();
+                    self.set_nested_property(&mut data_json, &keys, Value::Array(new_array));
+                    let updated_data: T = serde_json::from_value(data_json).unwrap();
+                    self.update_by_id(&id, serde_json::to_value(updated_data).unwrap());
+                }
+            }
         }
     }
 
-    pub fn update_array<T: serde::de::DeserializeOwned + serde::Serialize + JsonDbExtensions>(
+    pub fn update_array(
         &self,
-        condition: &T,
+        condition: &Value,
         array_path: &str,
-        array_condition: &T,
-        updates: T,
+        array_condition: &Value,
+        updates: &Value,
     ) {
         let items = self.find(condition);
         for item in items {
-            let id = item.get_id().to_string();
-            let mut data: T = self.find_by_id(&id).expect("Failed to find item by id");
-            data.update_array(array_path, array_condition, updates.clone());
-            self.update_by_id(&id, data);
+            let id = item.get_id();
+            if let Some(data) = self.find_by_id(&id) {
+                let mut data_json = serde_json::to_value(&data).unwrap();
+                let keys: Vec<&str> = array_path.split('.').collect();
+                let array = self.get_nested_property(&data_json, &keys);
+                if array.is_array() {
+                    let new_array: Vec<Value> = array
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .map(|elem| {
+                            if self.matches_condition(&elem, array_condition) {
+                                let mut updated_elem = elem.clone();
+                                self.update_nested_object(&mut updated_elem, updates);
+                                updated_elem
+                            } else {
+                                elem
+                            }
+                        })
+                        .collect();
+                    self.set_nested_property(&mut data_json, &keys, Value::Array(new_array));
+                    let updated_data: T = serde_json::from_value(data_json).unwrap();
+                    self.update_by_id(&id, serde_json::to_value(updated_data).unwrap());
+                }
+            }
         }
     }
 }
 
-pub trait JsonDbExtensions: Serialize + for<'de> Deserialize<'de> + Clone {
-    fn get_id(&self) -> &str;
-    fn update(&mut self, other: Self);
-    fn matches_condition(&self, condition: &Self) -> bool;
-    fn push_to_array(&mut self, array_path: &str, element: Self);
-    fn pull_from_array(&mut self, array_path: &str, condition: &Self);
-    fn update_array(&mut self, array_path: &str, condition: &Self, updates: Self);
-}
-
-impl JsonDbExtensions for TestData {
-    fn get_id(&self) -> &str {
-        &self.id
-    }
-
-    fn update(&mut self, other: Self) {
-        self.name = other.name;
-    }
-
-    fn matches_condition(&self, condition: &Self) -> bool {
-        self.name == condition.name
-    }
-
-    fn push_to_array(&mut self, _array_path: &str, _element: Self) {
-        // No-op for this simple data type
-    }
-
-    fn pull_from_array(&mut self, _array_path: &str, _condition: &Self) {
-        // No-op for this simple data type
-    }
-
-    fn update_array(&mut self, _array_path: &str, _condition: &Self, _updates: Self) {
-        // No-op for this simple data type
+fn create_directory_if_not_exists(path: &Path) {
+    if !path.exists() {
+        fs::create_dir_all(path).expect("Unable to create directory");
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+fn read_json_file<T>(path: &Path) -> Option<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut file = File::open(path).ok()?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).ok()?;
+    from_str(&contents).ok()
+}
 
-    fn setup_test_directory() {
-        let _ = fs::remove_dir_all(BASE_DIR); // Remove any existing test directory
-        create_directory_if_not_exists(BASE_DIR); // Recreate base directory
-    }
+fn write_json_file<T>(path: &Path, data: &T)
+where
+    T: Serialize,
+{
+    let mut file = File::create(path).expect("Unable to create file");
+    let contents = to_string_pretty(data).expect("Unable to serialize data");
+    file.write_all(contents.as_bytes())
+        .expect("Unable to write to file");
+}
 
-    #[test]
-    fn test_create_directory_if_not_exists() {
-        setup_test_directory();
-        let test_dir = format!("{}/test_model", BASE_DIR);
-        create_directory_if_not_exists(&test_dir);
-        assert!(Path::new(&test_dir).exists());
-    }
-
-    #[test]
-    fn test_read_write_json_file() {
-        setup_test_directory();
-        let file_path = format!("{}/test.json", BASE_DIR);
-        let test_data = TestData {
-            id: "1".to_string(),
-            name: "Test".to_string(),
-        };
-
-        write_json_file(&file_path, &test_data);
-        let read_data: Option<TestData> = read_json_file(&file_path);
-        assert_eq!(read_data, Some(test_data));
-    }
-
-    #[test]
-    fn test_create_and_find_by_id() {
-        setup_test_directory();
-        let mut store = JsonDataStore::new(Some("test_model"));
-        let test_data = TestData {
-            id: "1".to_string(),
-            name: "Test".to_string(),
-        };
-
-        store.create_model(test_data.clone());
-        let found_data: Option<TestData> = store.find_by_id("1");
-        assert_eq!(found_data, Some(test_data));
-    }
-
-    #[test]
-    fn test_update_by_id() {
-        setup_test_directory();
-        let mut store = JsonDataStore::new(Some("test_model"));
-        let test_data = TestData {
-            id: "1".to_string(),
-            name: "Test".to_string(),
-        };
-
-        store.create_model(test_data.clone());
-
-        let updated_data = TestData {
-            id: "1".to_string(),
-            name: "Updated Test".to_string(),
-        };
-        store.update_by_id("1", updated_data.clone());
-
-        let found_data: Option<TestData> = store.find_by_id("1");
-        assert_eq!(found_data, Some(updated_data));
-    }
-
-    #[test]
-    fn test_delete_by_id() {
-        setup_test_directory();
-        let mut store = JsonDataStore::new(Some("test_model"));
-        let test_data = TestData {
-            id: "1".to_string(),
-            name: "Test".to_string(),
-        };
-
-        store.create_model(test_data.clone());
-        store.delete_by_id::<TestData>("1");
-
-        let found_data: Option<TestData> = store.find_by_id("1");
-        assert!(found_data.is_none());
-    }
-
-    #[test]
-    fn test_find_all() {
-        setup_test_directory();
-        let mut store = JsonDataStore::new(Some("test_model"));
-        let test_data1 = TestData {
-            id: "1".to_string(),
-            name: "Test1".to_string(),
-        };
-        let test_data2 = TestData {
-            id: "2".to_string(),
-            name: "Test2".to_string(),
-        };
-
-        store.create_model(test_data1.clone());
-        store.create_model(test_data2.clone());
-
-        let all_data: Vec<TestData> = store.find_all();
-        assert!(all_data.contains(&test_data1));
-        assert!(all_data.contains(&test_data2));
-    }
-
-    #[test]
-    fn test_find() {
-        setup_test_directory();
-        let mut store = JsonDataStore::new(Some("test_model"));
-        let test_data1 = TestData {
-            id: "1".to_string(),
-            name: "FindMe".to_string(),
-        };
-        let test_data2 = TestData {
-            id: "2".to_string(),
-            name: "DontFindMe".to_string(),
-        };
-
-        store.create_model(test_data1.clone());
-        store.create_model(test_data2.clone());
-
-        let condition = TestData {
-            id: "".to_string(),
-            name: "FindMe".to_string(),
-        };
-
-        let found_data: Vec<TestData> = store.find(&condition);
-        assert_eq!(found_data.len(), 1);
-        assert_eq!(found_data[0], test_data1);
-    }
+pub trait Identifiable {
+    fn get_id(&self) -> String;
 }

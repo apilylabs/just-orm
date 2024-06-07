@@ -1,56 +1,69 @@
-// examples/example.rs
-use just_orm::{JsonDataStore, JsonDbExtensions, TestData};
+use just_orm::{Identifiable, JsonDatabase};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct User {
+    id: String,
+    name: String,
+    email: String,
+}
+
+impl Identifiable for User {
+    fn get_id(&self) -> String {
+        self.id.clone()
+    }
+}
+
 fn main() {
-    // 디렉터리 생성
-    let mut data_store = JsonDataStore::new(Some("test_model"));
+    // Initialize the database
+    let mut user_db: JsonDatabase<User> = JsonDatabase::new(Some("users"));
 
-    // 데이터 생성
-    let data1 = TestData {
+    // Example user data
+    let user1 = User {
         id: "1".to_string(),
-        name: "Alice".to_string(),
+        name: "John Doe".to_string(),
+        email: "john.doe@example.com".to_string(),
     };
-    let data2 = TestData {
+
+    let user2 = User {
         id: "2".to_string(),
-        name: "Bob".to_string(),
+        name: "Jane Smith".to_string(),
+        email: "jane.smith@example.com".to_string(),
     };
 
-    // 모델에 데이터 저장
-    data_store.create_model(data1.clone());
-    data_store.create_model(data2.clone());
+    // Create users
+    user_db.create_model(user1);
+    user_db.create_model(user2);
 
-    // ID로 데이터 찾기
-    if let Some(found_data) = data_store.find_by_id::<TestData>("1") {
-        println!("Found data by id: {:?}", found_data);
+    // Find a user by ID
+    if let Some(user) = user_db.find_by_id("1") {
+        println!("Found user: {:?}", user);
+    } else {
+        println!("User not found");
     }
 
-    // 모든 데이터 찾기
-    let all_data: Vec<TestData> = data_store.find_all();
-    println!("All data: {:?}", all_data);
+    // Update a user's information
+    let update_data = json!({
+        "name": "Johnathan Doe"
+    });
+    user_db.update_by_id("1", update_data);
 
-    // 조건에 맞는 데이터 찾기
-    let condition = TestData {
-        id: "".to_string(),
-        name: "Alice".to_string(),
-    };
-    let filtered_data: Vec<TestData> = data_store.find(&condition);
-    println!("Filtered data: {:?}", filtered_data);
+    // Find all users
+    let all_users = user_db.find_all();
+    println!("All users: {:?}", all_users);
 
-    // 데이터 업데이트
-    let updated_data = TestData {
-        id: "1".to_string(),
-        name: "Alice Updated".to_string(),
-    };
-    data_store.update_by_id("1", updated_data.clone());
+    // Find users by condition
+    let condition = json!({
+        "email": "jane.smith@example.com"
+    });
+    let found_users = user_db.find(&condition);
+    println!("Found users: {:?}", found_users);
 
-    // 업데이트된 데이터 확인
-    if let Some(found_data) = data_store.find_by_id::<TestData>("1") {
-        println!("Updated data: {:?}", found_data);
-    }
+    // Delete a user by ID
+    user_db.delete_by_id("2");
 
-    // 데이터 삭제
-    // data_store.delete_by_id::<TestData>("2");
-
-    // 삭제 후 모든 데이터 확인
-    let all_data_after_delete: Vec<TestData> = data_store.find_all();
-    println!("All data after delete: {:?}", all_data_after_delete);
+    // Find all users after deletion
+    let all_users_after_deletion = user_db.find_all();
+    println!("All users after deletion: {:?}", all_users_after_deletion);
 }
