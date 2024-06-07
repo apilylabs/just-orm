@@ -16,8 +16,8 @@ impl Identifiable for User {
 }
 
 fn main() {
-    // Initialize the database
-    let mut user_db: JsonDatabase<User> = JsonDatabase::new(Some("users"));
+    // Initialize the database with a custom base directory
+    let mut user_db: JsonDatabase<User> = JsonDatabase::new("custom-dir", Some("users"));
 
     // Example user data
     let user1 = User {
@@ -61,7 +61,7 @@ fn main() {
     println!("Found users: {:?}", found_users);
 
     // Delete a user by ID
-    user_db.delete_by_id("2");
+    // user_db.delete_by_id("2");
 
     // Find all users after deletion
     let all_users_after_deletion = user_db.find_all();

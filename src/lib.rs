@@ -4,8 +4,6 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const BASE_DIR: &str = "json-db";
-
 /// A simple JSON file-based database ORM for Rust.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonDatabase<T> {
@@ -22,20 +20,21 @@ where
     ///
     /// # Arguments
     ///
+    /// * `base_dir` - The base directory for the database.
     /// * `model_name` - Optional model name to initialize the database with.
     ///
     /// # Examples
     ///
     /// ```
-    /// let db: JsonDatabase<User> = JsonDatabase::new(Some("users"));
+    /// let db: JsonDatabase<User> = JsonDatabase::new("custom-dir", Some("users"));
     /// ```
-    pub fn new(model_name: Option<&str>) -> Self {
+    pub fn new(base_dir: &str, model_name: Option<&str>) -> Self {
         let base_path = if let Some(model_name) = model_name {
-            let path = Path::new(BASE_DIR).join(model_name);
+            let path = Path::new(base_dir).join(model_name);
             create_directory_if_not_exists(&path);
             path
         } else {
-            let path = Path::new(BASE_DIR).to_path_buf();
+            let path = Path::new(base_dir).to_path_buf();
             create_directory_if_not_exists(&path);
             path
         };
@@ -56,7 +55,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let mut db: JsonDatabase<User> = JsonDatabase::new(None);
+    /// let mut db: JsonDatabase<User> = JsonDatabase::new("custom-dir", None);
     /// db.model("users");
     /// ```
     pub fn model(&mut self, model_name: &str) -> &mut Self {
@@ -71,7 +70,7 @@ where
     ///
     /// * `model_name` - The name of the model.
     fn get_model_path(&self, model_name: &str) -> PathBuf {
-        Path::new(BASE_DIR).join(model_name)
+        self.base_path.join(model_name)
     }
 
     /// Returns the path to a specific file in the model directory.
@@ -206,6 +205,7 @@ where
     /// * `data` - The data to create.
     pub fn create(&self, id: &str, data: T) {
         let file_path = self.get_file_path(id);
+        create_directory_if_not_exists(file_path.parent().unwrap()); // Ensure the directory exists
         write_json_file(&file_path, &data);
     }
 
@@ -232,7 +232,7 @@ where
     pub fn update_by_id(&self, id: &str, data: Value) {
         let file_path = self.get_file_path(id);
 
-        if let Some(existing_data) = self.find_by_id(id) {
+        if let Some(mut existing_data) = self.find_by_id(id) {
             let mut existing_json = serde_json::to_value(&existing_data).unwrap();
 
             self.update_nested_object(&mut existing_json, &data);
