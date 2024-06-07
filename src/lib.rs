@@ -232,7 +232,7 @@ where
     pub fn update_by_id(&self, id: &str, data: Value) {
         let file_path = self.get_file_path(id);
 
-        if let Some(mut existing_data) = self.find_by_id(id) {
+        if let Some(existing_data) = self.find_by_id(id) {
             let mut existing_json = serde_json::to_value(&existing_data).unwrap();
 
             self.update_nested_object(&mut existing_json, &data);
