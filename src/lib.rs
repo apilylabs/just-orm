@@ -1,13 +1,18 @@
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, to_string_pretty, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+lazy_static! {
+    static ref BASE_DIR: Mutex<PathBuf> = Mutex::new(PathBuf::new());
+}
 
 /// A simple JSON file-based database ORM for Rust.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct JsonDatabase<T> {
-    base_path: PathBuf,
     current_model_name: Option<String>,
     _marker: std::marker::PhantomData<T>,
 }
@@ -20,27 +25,15 @@ where
     ///
     /// # Arguments
     ///
-    /// * `base_dir` - The base directory for the database.
     /// * `model_name` - Optional model name to initialize the database with.
     ///
     /// # Examples
     ///
     /// ```
-    /// let db: JsonDatabase<User> = JsonDatabase::new("custom-dir", Some("users"));
+    /// let db: JsonDatabase<User> = JsonDatabase::new(Some("users"));
     /// ```
-    pub fn new(base_dir: &str, model_name: Option<&str>) -> Self {
-        let base_path = if let Some(model_name) = model_name {
-            let path = Path::new(base_dir).join(model_name);
-            create_directory_if_not_exists(&path);
-            path
-        } else {
-            let path = Path::new(base_dir).to_path_buf();
-            create_directory_if_not_exists(&path);
-            path
-        };
-
+    pub fn new(model_name: Option<&str>) -> Self {
         JsonDatabase {
-            base_path,
             current_model_name: model_name.map(String::from),
             _marker: std::marker::PhantomData,
         }
@@ -55,7 +48,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let mut db: JsonDatabase<User> = JsonDatabase::new("custom-dir", None);
+    /// let mut db: JsonDatabase<User> = JsonDatabase::new(None);
     /// db.model("users");
     /// ```
     pub fn model(&mut self, model_name: &str) -> &mut Self {
@@ -64,13 +57,18 @@ where
         self
     }
 
+    /// Returns the base path for the database.
+    fn base_path() -> PathBuf {
+        BASE_DIR.lock().unwrap().clone()
+    }
+
     /// Returns the path to the model directory.
     ///
     /// # Arguments
     ///
     /// * `model_name` - The name of the model.
     fn get_model_path(&self, model_name: &str) -> PathBuf {
-        self.base_path.join(model_name)
+        Self::base_path().join(model_name)
     }
 
     /// Returns the path to a specific file in the model directory.
@@ -444,6 +442,25 @@ where
                 }
             }
         }
+    }
+}
+
+impl JsonDatabase<()> {
+    /// Sets the base directory for the database.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_dir` - The base directory for the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// JsonDatabase::set_base_dir("custom-dir");
+    /// ```
+    pub fn set_base_dir(base_dir: &str) {
+        let mut base_path = BASE_DIR.lock().unwrap();
+        *base_path = Path::new(base_dir).to_path_buf();
+        create_directory_if_not_exists(&base_path);
     }
 }
 
